@@ -1,0 +1,32 @@
+# Build output (CMake presets put everything under build/)
+build/
+out/
+cmake-build-*/
+
+# vcpkg: dependencies are downloaded and built on demand, never committed
+vcpkg_installed/
+.vcpkg-cache/
+
+# CMake files that are personal or generated
+CMakeUserPresets.json
+compile_commands.json
+
+# Editors and tools
+.vscode/
+.idea/
+.cache/
+*.swp
+*~
+
+# OS clutter (Zone.Identifier files appear when copying from Windows into WSL)
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# Secrets and local configuration (commit a .env.example instead)
+.env
+*.env.local
+
+# Generated artifacts
+*.pb
+*.log

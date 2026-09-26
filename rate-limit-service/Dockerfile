@@ -25,10 +25,14 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin vcpkg itself; the actual dependency versions come from vcpkg.json's
-# builtin-baseline, not from this commit.
+# Full clone (not --depth 1): vcpkg resolves vcpkg.json's builtin-baseline from
+# git history, and a shallow clone of a newer HEAD does not contain it. Checking
+# out the baseline also pins the vcpkg tool to the version used in WSL.
+# Keep VCPKG_COMMIT equal to "builtin-baseline" in rate-limit-service/vcpkg.json.
+ARG VCPKG_COMMIT=b08975f4fdf01ad9a5c08db8f1953a57d11e8b26
 ENV VCPKG_ROOT=/opt/vcpkg
-RUN git clone --depth 1 https://github.com/microsoft/vcpkg "$VCPKG_ROOT" \
+RUN git clone https://github.com/microsoft/vcpkg "$VCPKG_ROOT" \
+    && git -C "$VCPKG_ROOT" checkout --quiet "$VCPKG_COMMIT" \
     && "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
 ENV PATH="$VCPKG_ROOT:$PATH"
 

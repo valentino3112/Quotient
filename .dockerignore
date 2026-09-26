@@ -1,0 +1,10 @@
+# Build context is the repo root (deploy/docker-compose.yml: context: ..).
+# Keep it small: never send local build trees or git history to Docker.
+**/build/
+**/vcpkg_installed/
+.git
+.vscode/
+*.patch
+# Local-only notes, never part of the image.
+CLAUDE.md
+docs/quotient-guide.md

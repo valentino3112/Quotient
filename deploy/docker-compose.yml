@@ -24,7 +24,9 @@ services:
     volumes:
       - ../database:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quotient}"]
+      # -h localhost (TCP): during first start the image runs 0001/0002 on a
+      # temporary socket-only server, so a socket check reports healthy too early.
+      test: ["CMD-SHELL", "pg_isready -h localhost -U ${POSTGRES_USER:-quotient} -d ${POSTGRES_DB:-quotient}"]
       interval: 2s
       retries: 30
 

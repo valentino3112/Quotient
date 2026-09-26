@@ -1,5 +1,6 @@
 add_executable(quotient
   main.cpp
+  util/config.cpp
   web/rate_limit_grpc_service.cpp
 )
 target_include_directories(quotient PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -13,12 +13,11 @@
 #include <memory>
 #include <string>
 
+#include "util/config.h"
 #include "web/rate_limit_grpc_service.h"
 
 namespace {
 
-constexpr const char* kRlsAddress = "0.0.0.0:8081";  // moves to util/config in step 3
-constexpr int kRlsMaxThreads = 32;
 constexpr auto kShutdownGrace = std::chrono::seconds(5);
 
 // Blocks until SIGINT (Ctrl+C) or SIGTERM (docker stop) arrives.
@@ -32,8 +31,15 @@ int WaitForShutdownSignal(const sigset_t& signals) {
 }  // namespace
 
 int main() {
-  //spdlog::cfg::load_env_levels(); // SPDLOG_LEVEL=debug
-  spdlog::set_level(spdlog::level::debug); // Set *global* log level to debug
+  spdlog::cfg::load_env_levels();  // SPDLOG_LEVEL=debug shows one line per RLS call
+
+  quotient::util::Config config;
+  try {
+    config = quotient::util::LoadConfigFromEnv();
+  } catch (const std::exception& e) {
+    spdlog::critical("invalid configuration: {}", e.what());
+    return 1;
+  }
 
   // Block the shutdown signals before gRPC starts its threads, so every thread
   // inherits the mask and only our sigwait() receives them.
@@ -50,19 +56,23 @@ int main() {
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
 
+  // Caps the worker threads so a traffic spike cannot exhaust the machine.
+  grpc::ResourceQuota quota("rls");
+  quota.SetMaxThreads(config.rls_max_threads);
 
   grpc::ServerBuilder builder;
-  builder.AddListeningPort(kRlsAddress, grpc::InsecureServerCredentials());
+  builder.AddListeningPort(config.rls_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&rls_service);
+  builder.SetResourceQuota(quota);
 
   std::unique_ptr<grpc::Server> rls_server = builder.BuildAndStart();
   if (!rls_server) {
-    spdlog::critical("failed to start RLS server on {}", kRlsAddress);
+    spdlog::critical("failed to start RLS server on {}", config.rls_address);
     return 1;
   }
   // Stub has nothing to load, so it is ready immediately.
   rls_server->GetHealthCheckService()->SetServingStatus(true);
-  spdlog::info("RLS gRPC server listening on {}", kRlsAddress);
+  spdlog::info("RLS gRPC server listening on {} (max {} threads)", config.rls_address, config.rls_max_threads);
 
   int signal = WaitForShutdownSignal(shutdown_signals);
   spdlog::info("received signal {}, shutting down", signal);

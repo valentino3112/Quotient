@@ -54,7 +54,6 @@ int main() {
   grpc::ServerBuilder builder;
   builder.AddListeningPort(kRlsAddress, grpc::InsecureServerCredentials());
   builder.RegisterService(&rls_service);
-  builder.SetResourceQuota(quota);
 
   std::unique_ptr<grpc::Server> rls_server = builder.BuildAndStart();
   if (!rls_server) {

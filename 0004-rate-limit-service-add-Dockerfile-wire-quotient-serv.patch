@@ -1,0 +1,116 @@
+From 1f22b793cbbbd91250abd5417926eecf5d1e987d Mon Sep 17 00:00:00 2001
+From: Person B <person-b@example.com>
+Date: Sat, 26 Sep 2026 15:59:20 +0000
+Subject: [PATCH 4/4] rate-limit-service: add Dockerfile, wire quotient service
+ into compose
+
+---
+ deploy/docker-compose.yml     | 19 ++++++++++-
+ rate-limit-service/Dockerfile | 63 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 81 insertions(+), 1 deletion(-)
+ create mode 100644 rate-limit-service/Dockerfile
+
+diff --git a/deploy/docker-compose.yml b/deploy/docker-compose.yml
+index 16f8e1d..12087e4 100644
+--- a/deploy/docker-compose.yml
++++ b/deploy/docker-compose.yml
+@@ -37,9 +37,26 @@ services:
+     image: hashicorp/http-echo
+     command: ["-text=hello from the protected API"]
+ 
++  quotient:                       # scale with: docker compose up -d --scale quotient=3
++    build:
++      context: ..
++      dockerfile: rate-limit-service/Dockerfile
++      target: runtime
++    environment:
++      QUOTIENT_PG_URL: postgresql://quotient:quotient@postgres:5432/quotient
++      QUOTIENT_REDIS_URL: tcp://redis:6379
++      QUOTIENT_ADMIN_TOKEN: dev-admin-token   # dev-only value, not a real secret
++      SPDLOG_LEVEL: debug                     # one log line per RLS call; see CLAUDE.md §6
++    depends_on:
++      postgres: { condition: service_healthy }
++      redis: { condition: service_started }
++    # No ports published: several replicas can't bind the same host port, and
++    # every caller reaches quotient through the Compose network (envoy, or
++    # another container) rather than from the host.
++
+   envoy:
+     image: envoyproxy/envoy:v1.37.6
+     volumes:
+       - ../gateway/envoy.yaml:/etc/envoy/envoy.yaml:ro
+     ports: ["8080:8080", "9901:9901"]  # 8000 (REST admin) added once admin.proto exists
+-    depends_on: [backend]
++    depends_on: [backend, quotient]
+diff --git a/rate-limit-service/Dockerfile b/rate-limit-service/Dockerfile
+new file mode 100644
+index 0000000..32a780b
+--- /dev/null
++++ b/rate-limit-service/Dockerfile
+@@ -0,0 +1,63 @@
++# SPDX-License-Identifier: Apache-2.0
++#
++# Build context is the REPO ROOT (see deploy/docker-compose.yml: `context: ..`),
++# because the vcpkg toolchain and proto generation expect the layout described
++# in CLAUDE.md §5. Build with e.g.:
++#   docker build -f rate-limit-service/Dockerfile -t quotient .
++#
++# Two stages:
++#   builder  - full toolchain + vcpkg, compiles the "release" CMake preset
++#   runtime  - just the resulting binary on a slim base
++#
++# vcpkg.json is copied and `vcpkg install` run BEFORE the rest of the source is
++# copied in, so that the 20-40 minute first-time dependency build (guide/CLAUDE.md
++# §4) stays in its own Docker layer and is reused by the cache on every later
++# build that doesn't touch rate-limit-service/vcpkg.json.
++
++# ---------------------------------------------------------------------------
++FROM ubuntu:24.04 AS builder
++
++# Same package list as CLAUDE.md §4 (WSL2 dev setup), so "it builds in Docker"
++# and "it builds on my machine" mean the same thing.
++RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
++      build-essential ninja-build pkg-config cmake git curl zip unzip tar ca-certificates \
++      linux-libc-dev bison flex autoconf autoconf-archive automake libtool \
++      python3 python3-venv \
++    && rm -rf /var/lib/apt/lists/*
++
++# Pin vcpkg itself; the actual dependency versions come from vcpkg.json's
++# builtin-baseline, not from this commit.
++ENV VCPKG_ROOT=/opt/vcpkg
++RUN git clone --depth 1 https://github.com/microsoft/vcpkg "$VCPKG_ROOT" \
++    && "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
++ENV PATH="$VCPKG_ROOT:$PATH"
++
++WORKDIR /build/rate-limit-service
++
++# --- dependency layer: cached as long as vcpkg.json is unchanged ---
++COPY rate-limit-service/vcpkg.json ./
++# See CLAUDE.md §4: lower VCPKG_MAX_CONCURRENCY if a port gets OOM-killed.
++RUN vcpkg install --triplet x64-linux
++
++# --- source layer: rebuilds only this and below when source changes ---
++COPY rate-limit-service/ ./
++RUN cmake --preset release -DVCPKG_INSTALLED_DIR=/build/rate-limit-service/vcpkg_installed \
++    && cmake --build --preset release
++
++# ---------------------------------------------------------------------------
++FROM ubuntu:24.04 AS runtime
++
++# ca-certificates: harmless now (RLS/admin use InsecureServerCredentials in the
++# dev demo) and needed the day TLS is turned on. No other packages: vcpkg's
++# x64-linux triplet builds static libraries, so grpc/protobuf/openssl/libpqxx/
++# redis-plus-plus/spdlog are already linked into the binary.
++RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
++      ca-certificates \
++    && rm -rf /var/lib/apt/lists/* \
++    && useradd --system --no-create-home --shell /usr/sbin/nologin quotient
++
++COPY --from=builder /build/rate-limit-service/build/release/src/quotient /usr/local/bin/quotient
++
++USER quotient
++# Quotient handles SIGTERM itself (main.cpp), so no init wrapper is needed.
++ENTRYPOINT ["/usr/local/bin/quotient"]
+-- 
+2.43.0
+

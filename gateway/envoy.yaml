@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from docs/quotient-guide.md §18. Only the "edge" listener (public,
+# rate-limited traffic) is here so far. The "admin_rest" listener (gRPC-JSON
+# transcoding on :8000) is added once rate-limit-service/proto/admin.proto
+# exists and we have a quotient_admin.pb descriptor set to mount — see
+# CLAUDE.md §11 and HANDOFF-person-b.md §4/§5 task 6.
+
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+static_resources:
+  listeners:
+  # ---------------- public traffic, rate limited ----------------
+  - name: edge
+    address:
+      socket_address: { address: 0.0.0.0, port_value: 8080 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: edge
+          route_config:
+            name: edge_routes
+            virtual_hosts:
+            - name: api
+              domains: ["*"]
+              routes:
+              - match: { prefix: "/v1/orders" }
+                route:
+                  cluster: backend
+                  rate_limits:
+                  - actions:                    # descriptor: per tenant
+                    - request_headers: { header_name: x-api-key, descriptor_key: api_key }
+                  - actions:                    # descriptor: per tenant and route
+                    - request_headers: { header_name: x-api-key, descriptor_key: api_key }
+                    - generic_key: { descriptor_key: route, descriptor_value: orders }
+                  - actions:                    # descriptor: no API key at all
+                    - header_value_match:
+                        descriptor_value: no_api_key
+                        expect_match: false
+                        headers: [{ name: x-api-key, present_match: true }]
+              - match: { prefix: "/" }
+                route:
+                  cluster: backend
+                  rate_limits:
+                  - actions:
+                    - request_headers: { header_name: x-api-key, descriptor_key: api_key }
+                  - actions:
+                    - header_value_match:
+                        descriptor_value: no_api_key
+                        expect_match: false
+                        headers: [{ name: x-api-key, present_match: true }]
+          http_filters:
+          - name: envoy.filters.http.ratelimit
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
+              domain: api
+              failure_mode_deny: false          # fail open if Quotient is unreachable
+              timeout: 0.02s
+              enable_x_ratelimit_headers: DRAFT_VERSION_03
+              rate_limit_service:
+                transport_api_version: V3
+                grpc_service:
+                  envoy_grpc: { cluster_name: quotient_rls }
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  - name: backend
+    type: STRICT_DNS
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: backend
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: backend, port_value: 5678 } } }
+
+  - name: quotient_rls
+    type: STRICT_DNS                        # resolves every replica of the service
+    connect_timeout: 0.25s
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config: { http2_protocol_options: {} }   # gRPC needs HTTP/2
+    health_checks:
+    - timeout: 0.5s
+      interval: 2s
+      unhealthy_threshold: 2
+      healthy_threshold: 1
+      grpc_health_check: {}
+    load_assignment:
+      cluster_name: quotient_rls
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: quotient, port_value: 8081 } } }

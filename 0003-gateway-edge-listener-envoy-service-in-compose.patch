@@ -1,0 +1,151 @@
+From 46fbafb3ffcd56d5ea8d8647ac1a85ffe1a552aa Mon Sep 17 00:00:00 2001
+From: Person B <person-b@example.com>
+Date: Sat, 26 Sep 2026 15:57:50 +0000
+Subject: [PATCH 3/4] gateway: edge listener + envoy service in compose
+
+---
+ deploy/docker-compose.yml | 17 +++++--
+ gateway/envoy.yaml        | 99 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 113 insertions(+), 3 deletions(-)
+ create mode 100644 gateway/envoy.yaml
+
+diff --git a/deploy/docker-compose.yml b/deploy/docker-compose.yml
+index 84e1664..16f8e1d 100644
+--- a/deploy/docker-compose.yml
++++ b/deploy/docker-compose.yml
+@@ -1,9 +1,13 @@
+ # SPDX-License-Identifier: Apache-2.0
+ #
+ # Quotient demo stack. Adapted from docs/quotient-guide.md §19: migrations live in
+-# ../database (not ../migrations), and this file only has the services needed so
+-# far (postgres, redis, backend). envoy and quotient are added in later commits,
+-# once gateway/envoy.yaml and the Quotient Dockerfile exist.
++# ../database (not ../migrations), and Envoy's config lives in ../gateway (not
++# ../deploy/envoy). quotient is added once rate-limit-service/Dockerfile exists.
++#
++# Envoy version is pinned explicitly (v1.37.6, the current 1.37 stable release as
++# of this writing) rather than using a floating tag, per HANDOFF-person-b.md §4:
++# tell Person A which tag, since the RLS proto field numbers must be checked
++# against it.
+ #
+ # Run from the deploy/ directory: docker compose up -d
+ 
+@@ -32,3 +36,10 @@ services:
+   backend:
+     image: hashicorp/http-echo
+     command: ["-text=hello from the protected API"]
++
++  envoy:
++    image: envoyproxy/envoy:v1.37.6
++    volumes:
++      - ../gateway/envoy.yaml:/etc/envoy/envoy.yaml:ro
++    ports: ["8080:8080", "9901:9901"]  # 8000 (REST admin) added once admin.proto exists
++    depends_on: [backend]
+diff --git a/gateway/envoy.yaml b/gateway/envoy.yaml
+new file mode 100644
+index 0000000..d1e0d23
+--- /dev/null
++++ b/gateway/envoy.yaml
+@@ -0,0 +1,99 @@
++# SPDX-License-Identifier: Apache-2.0
++#
++# Adapted from docs/quotient-guide.md §18. Only the "edge" listener (public,
++# rate-limited traffic) is here so far. The "admin_rest" listener (gRPC-JSON
++# transcoding on :8000) is added once rate-limit-service/proto/admin.proto
++# exists and we have a quotient_admin.pb descriptor set to mount — see
++# CLAUDE.md §11 and HANDOFF-person-b.md §4/§5 task 6.
++
++admin:
++  address:
++    socket_address: { address: 0.0.0.0, port_value: 9901 }
++
++static_resources:
++  listeners:
++  # ---------------- public traffic, rate limited ----------------
++  - name: edge
++    address:
++      socket_address: { address: 0.0.0.0, port_value: 8080 }
++    filter_chains:
++    - filters:
++      - name: envoy.filters.network.http_connection_manager
++        typed_config:
++          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
++          stat_prefix: edge
++          route_config:
++            name: edge_routes
++            virtual_hosts:
++            - name: api
++              domains: ["*"]
++              routes:
++              - match: { prefix: "/v1/orders" }
++                route:
++                  cluster: backend
++                  rate_limits:
++                  - actions:                    # descriptor: per tenant
++                    - request_headers: { header_name: x-api-key, descriptor_key: api_key }
++                  - actions:                    # descriptor: per tenant and route
++                    - request_headers: { header_name: x-api-key, descriptor_key: api_key }
++                    - generic_key: { descriptor_key: route, descriptor_value: orders }
++                  - actions:                    # descriptor: no API key at all
++                    - header_value_match:
++                        descriptor_value: no_api_key
++                        expect_match: false
++                        headers: [{ name: x-api-key, present_match: true }]
++              - match: { prefix: "/" }
++                route:
++                  cluster: backend
++                  rate_limits:
++                  - actions:
++                    - request_headers: { header_name: x-api-key, descriptor_key: api_key }
++                  - actions:
++                    - header_value_match:
++                        descriptor_value: no_api_key
++                        expect_match: false
++                        headers: [{ name: x-api-key, present_match: true }]
++          http_filters:
++          - name: envoy.filters.http.ratelimit
++            typed_config:
++              "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
++              domain: api
++              failure_mode_deny: false          # fail open if Quotient is unreachable
++              timeout: 0.02s
++              enable_x_ratelimit_headers: DRAFT_VERSION_03
++              rate_limit_service:
++                transport_api_version: V3
++                grpc_service:
++                  envoy_grpc: { cluster_name: quotient_rls }
++          - name: envoy.filters.http.router
++            typed_config:
++              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
++
++  clusters:
++  - name: backend
++    type: STRICT_DNS
++    connect_timeout: 1s
++    load_assignment:
++      cluster_name: backend
++      endpoints:
++      - lb_endpoints:
++        - endpoint: { address: { socket_address: { address: backend, port_value: 5678 } } }
++
++  - name: quotient_rls
++    type: STRICT_DNS                        # resolves every replica of the service
++    connect_timeout: 0.25s
++    typed_extension_protocol_options:
++      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
++        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
++        explicit_http_config: { http2_protocol_options: {} }   # gRPC needs HTTP/2
++    health_checks:
++    - timeout: 0.5s
++      interval: 2s
++      unhealthy_threshold: 2
++      healthy_threshold: 1
++      grpc_health_check: {}
++    load_assignment:
++      cluster_name: quotient_rls
++      endpoints:
++      - lb_endpoints:
++        - endpoint: { address: { socket_address: { address: quotient, port_value: 8081 } } }
+-- 
+2.43.0
+

@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Quotient demo stack. Adapted from docs/quotient-guide.md §19: migrations live in
+# ../database (not ../migrations), and Envoy's config lives in ../gateway (not
+# ../deploy/envoy). quotient is added once rate-limit-service/Dockerfile exists.
+#
+# Envoy version is pinned explicitly (v1.37.6, the current 1.37 stable release as
+# of this writing) rather than using a floating tag, per HANDOFF-person-b.md §4:
+# tell Person A which tag, since the RLS proto field numbers must be checked
+# against it.
+#
+# Run from the deploy/ directory: docker compose up -d
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: quotient
+      POSTGRES_PASSWORD: quotient
+      POSTGRES_DB: quotient
+    ports: ["5432:5432"]
+    volumes:
+      - ../database:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quotient"]
+      interval: 2s
+      retries: 30
+
+  redis:
+    image: redis:7
+    # No persistence: counters are disposable, and Redis server TIME is used
+    # directly by the Lua scripts, so nodes never need to compare clocks.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]
+
+  backend:
+    image: hashicorp/http-echo
+    command: ["-text=hello from the protected API"]
+
+  quotient:                       # scale with: docker compose up -d --scale quotient=3
+    build:
+      context: ..
+      dockerfile: rate-limit-service/Dockerfile
+      target: runtime
+    environment:
+      QUOTIENT_PG_URL: postgresql://quotient:quotient@postgres:5432/quotient
+      QUOTIENT_REDIS_URL: tcp://redis:6379
+      QUOTIENT_ADMIN_TOKEN: dev-admin-token   # dev-only value, not a real secret
+      SPDLOG_LEVEL: debug                     # one log line per RLS call; see CLAUDE.md §6
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+    # No ports published: several replicas can't bind the same host port, and
+    # every caller reaches quotient through the Compose network (envoy, or
+    # another container) rather than from the host.
+
+  envoy:
+    image: envoyproxy/envoy:v1.37.6
+    volumes:
+      - ../gateway/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    ports: ["8080:8080", "9901:9901"]  # 8000 (REST admin) added once admin.proto exists
+    depends_on: [backend, quotient]

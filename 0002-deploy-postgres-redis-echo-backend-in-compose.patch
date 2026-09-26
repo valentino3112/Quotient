@@ -1,0 +1,53 @@
+From 2d6622b3217da675dbbca676b09ea41af370ef6f Mon Sep 17 00:00:00 2001
+From: Person B <person-b@example.com>
+Date: Sat, 26 Sep 2026 15:57:16 +0000
+Subject: [PATCH 2/4] deploy: postgres, redis, echo backend in compose
+
+---
+ deploy/docker-compose.yml | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+ create mode 100644 deploy/docker-compose.yml
+
+diff --git a/deploy/docker-compose.yml b/deploy/docker-compose.yml
+new file mode 100644
+index 0000000..84e1664
+--- /dev/null
++++ b/deploy/docker-compose.yml
+@@ -0,0 +1,34 @@
++# SPDX-License-Identifier: Apache-2.0
++#
++# Quotient demo stack. Adapted from docs/quotient-guide.md §19: migrations live in
++# ../database (not ../migrations), and this file only has the services needed so
++# far (postgres, redis, backend). envoy and quotient are added in later commits,
++# once gateway/envoy.yaml and the Quotient Dockerfile exist.
++#
++# Run from the deploy/ directory: docker compose up -d
++
++services:
++  postgres:
++    image: postgres:17
++    environment:
++      POSTGRES_USER: quotient
++      POSTGRES_PASSWORD: quotient
++      POSTGRES_DB: quotient
++    ports: ["5432:5432"]
++    volumes:
++      - ../database:/docker-entrypoint-initdb.d:ro
++    healthcheck:
++      test: ["CMD-SHELL", "pg_isready -U quotient"]
++      interval: 2s
++      retries: 30
++
++  redis:
++    image: redis:7
++    # No persistence: counters are disposable, and Redis server TIME is used
++    # directly by the Lua scripts, so nodes never need to compare clocks.
++    command: ["redis-server", "--save", "", "--appendonly", "no"]
++    ports: ["6379:6379"]
++
++  backend:
++    image: hashicorp/http-echo
++    command: ["-text=hello from the protected API"]
+-- 
+2.43.0
+

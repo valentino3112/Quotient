@@ -1,0 +1,154 @@
+From b0e1584b0734d8b499075875970df5cf6cd16095 Mon Sep 17 00:00:00 2001
+From: Person B <person-b@example.com>
+Date: Sat, 26 Sep 2026 15:56:59 +0000
+Subject: [PATCH 1/4] =?UTF-8?q?database:=20add=20schema=20and=20seed=20mig?=
+ =?UTF-8?q?rations=20(guide=20=C2=A715.1/15.2)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ database/0001_init.sql | 95 ++++++++++++++++++++++++++++++++++++++++++
+ database/0002_seed.sql | 28 +++++++++++++
+ 2 files changed, 123 insertions(+)
+ create mode 100644 database/0001_init.sql
+ create mode 100644 database/0002_seed.sql
+
+diff --git a/database/0001_init.sql b/database/0001_init.sql
+new file mode 100644
+index 0000000..bf5d170
+--- /dev/null
++++ b/database/0001_init.sql
+@@ -0,0 +1,95 @@
++-- SPDX-License-Identifier: Apache-2.0
++--
++-- Quotient schema. Copied verbatim from docs/quotient-guide.md §15.1.
++-- Run automatically by the postgres container on first start (mounted read-only
++-- at /docker-entrypoint-initdb.d, see deploy/docker-compose.yml). Runs only when
++-- the data directory is empty: `docker compose down -v` to re-run from scratch.
++-- Never edit an applied migration; add a new numbered file instead.
++
++CREATE TABLE tenants (
++  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++  slug          TEXT NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9-]{2,40}$'),
++  display_name  TEXT NOT NULL,
++  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++CREATE TABLE api_keys (
++  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++  tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
++  key_hash    BYTEA NOT NULL UNIQUE,     -- SHA-256 of the secret; never plaintext
++  prefix      TEXT NOT NULL,             -- first characters, for display only
++  label       TEXT NOT NULL DEFAULT '',
++  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
++  revoked_at  TIMESTAMPTZ
++);
++CREATE INDEX api_keys_tenant_idx ON api_keys (tenant_id);
++
++CREATE TYPE algorithm    AS ENUM ('fixed_window', 'gcra', 'leased');
++CREATE TYPE failure_mode AS ENUM ('fail_open', 'fail_closed', 'local_fallback');
++CREATE TYPE rate_unit    AS ENUM ('second', 'minute', 'hour', 'day');
++
++CREATE TABLE policies (
++  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++  name               TEXT NOT NULL UNIQUE,
++  domain             TEXT NOT NULL,
++  match              JSONB NOT NULL,   -- [{"key":"tenant","value":"acme"}, ...]
++  match_signature    TEXT NOT NULL,    -- canonical form, e.g. 'tenant=*|route=orders'
++  algorithm          algorithm NOT NULL,
++  requests_per_unit  INTEGER NOT NULL CHECK (requests_per_unit > 0),
++  unit               rate_unit NOT NULL,
++  burst              INTEGER CHECK (burst IS NULL OR burst > 0),
++  failure_mode       failure_mode NOT NULL DEFAULT 'fail_open',
++  shadow             BOOLEAN NOT NULL DEFAULT false,
++  version            BIGINT NOT NULL DEFAULT 1,
++  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
++  UNIQUE (domain, match_signature)     -- two policies can never match identically
++);
++
++-- Usage is historical fact: keyed by slug (no FK) so it survives tenant
++-- deletion and can record the 'anonymous' pseudo-tenant.
++CREATE TABLE usage_hourly (
++  tenant_slug  TEXT NOT NULL,
++  hour         TIMESTAMPTZ NOT NULL,
++  policy_name  TEXT NOT NULL,
++  allowed      BIGINT NOT NULL DEFAULT 0,
++  limited      BIGINT NOT NULL DEFAULT 0,
++  PRIMARY KEY (tenant_slug, hour, policy_name)
++);
++
++CREATE TABLE audit_log (
++  id      BIGSERIAL PRIMARY KEY,
++  actor   TEXT NOT NULL,
++  action  TEXT NOT NULL,               -- e.g. 'policy.put', 'api_key.revoke'
++  entity  TEXT NOT NULL,
++  before  JSONB,
++  after   JSONB,
++  at      TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++-- Single-row configuration version, bumped on every config change.
++CREATE TABLE config_state (
++  id       BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
++  version  BIGINT NOT NULL
++);
++INSERT INTO config_state VALUES (true, 1);
++
++CREATE FUNCTION notify_config_change() RETURNS trigger AS $$
++DECLARE v BIGINT;
++BEGIN
++  UPDATE config_state SET version = version + 1 RETURNING version INTO v;
++  PERFORM pg_notify('quotient_config', v::text);
++  RETURN NULL;
++END;
++$$ LANGUAGE plpgsql;
++
++CREATE TRIGGER policies_changed AFTER INSERT OR UPDATE OR DELETE ON policies
++  FOR EACH STATEMENT EXECUTE FUNCTION notify_config_change();
++CREATE TRIGGER api_keys_changed AFTER INSERT OR UPDATE OR DELETE ON api_keys
++  FOR EACH STATEMENT EXECUTE FUNCTION notify_config_change();
++CREATE TRIGGER tenants_changed AFTER INSERT OR UPDATE OR DELETE ON tenants
++  FOR EACH STATEMENT EXECUTE FUNCTION notify_config_change();
++
++-- Note: NOTIFY is transactional -- listeners only see it once this script's
++-- implicit transaction commits, and never if it rolls back. gen_random_uuid()
++-- is built into PostgreSQL 13+; sha256() (used by 0002_seed.sql) is built into
++-- PostgreSQL 14+. We run postgres:17, so both are available with no extension.
+diff --git a/database/0002_seed.sql b/database/0002_seed.sql
+new file mode 100644
+index 0000000..f6b4d24
+--- /dev/null
++++ b/database/0002_seed.sql
+@@ -0,0 +1,28 @@
++-- SPDX-License-Identifier: Apache-2.0
++--
++-- Demo seed data. Copied verbatim from docs/quotient-guide.md §15.2.
++-- Runs right after 0001_init.sql (alphabetical order in /docker-entrypoint-initdb.d).
++
++INSERT INTO tenants (slug, display_name) VALUES
++  ('acme', 'Acme Corp'), ('globex', 'Globex'), ('initech', 'Initech');
++
++-- Demo keys: qk_demo_acme, qk_demo_globex, qk_demo_initech
++INSERT INTO api_keys (tenant_id, key_hash, prefix, label)
++SELECT id, sha256(convert_to('qk_demo_' || slug, 'UTF8')), 'qk_demo_', 'demo key'
++FROM tenants;
++
++INSERT INTO policies (name, domain, match, match_signature, algorithm,
++                      requests_per_unit, unit, burst, failure_mode) VALUES
++  ('tenant-default', 'api', '[{"key":"tenant","value":""}]', 'tenant=*',
++   'gcra', 100, 'second', 100, 'fail_open'),
++  ('tenant-globex', 'api', '[{"key":"tenant","value":"globex"}]', 'tenant=globex',
++   'gcra', 20, 'second', 20, 'fail_open'),
++  ('anonymous', 'api', '[{"key":"tenant","value":"anonymous"}]', 'tenant=anonymous',
++   'fixed_window', 10, 'minute', NULL, 'fail_closed'),
++  ('orders-per-tenant', 'api',
++   '[{"key":"tenant","value":""},{"key":"route","value":"orders"}]',
++   'tenant=*|route=orders', 'gcra', 50, 'second', 50, 'local_fallback');
++
++-- Gives the demo three behaviours to show: a generous default, a small customer
++-- (Globex) that hits its limit easily, and a strict fail-closed policy for
++-- anonymous traffic.
+-- 
+2.43.0
+

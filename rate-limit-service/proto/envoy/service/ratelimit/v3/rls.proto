@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Derived from Envoy's api/envoy/service/ratelimit/v3/rls.proto and
+// api/envoy/extensions/common/ratelimit/v3/ratelimit.proto
+// (https://github.com/envoyproxy/envoy, Apache-2.0, Copyright Envoy Project Authors).
+//
+// This is a wire-compatible SUBSET: only the fields Quotient uses are declared.
+// Package, service and method names must match upstream exactly (they form the
+// gRPC path), and every field number must match upstream (only numbers go on the
+// wire). Fields we omit are simply skipped as unknown fields when received.
+// Upstream's RateLimitDescriptor lives in envoy.extensions.common.ratelimit.v3;
+// message package names are not sent on the wire, so it is declared here instead.
+
+syntax = "proto3";
+
+package envoy.service.ratelimit.v3;
+
+import "google/protobuf/duration.proto";
+
+service RateLimitService {
+  // Envoy calls this before forwarding a request.
+  rpc ShouldRateLimit(RateLimitRequest) returns (RateLimitResponse) {}
+}
+
+// A list of key/value entries, e.g. [api_key=K, route=orders].
+message RateLimitDescriptor {
+  message Entry {
+    string key = 1;
+    string value = 2;
+  }
+
+  repeated Entry entries = 1;
+  // Omitted: limit = 2, hits_addend = 3, is_negative_hits = 4.
+}
+
+message RateLimitRequest {
+  // Must equal the domain of our policies ("api").
+  string domain = 1;
+
+  // Each descriptor is checked independently; one over limit => request over limit.
+  repeated RateLimitDescriptor descriptors = 2;
+
+  // How many hits to add; 0 means 1.
+  uint32 hits_addend = 3;
+}
+
+message RateLimitResponse {
+  enum Code {
+    UNKNOWN = 0;
+    OK = 1;
+    OVER_LIMIT = 2;
+  }
+
+  message RateLimit {
+    enum Unit {
+      UNKNOWN = 0;
+      SECOND = 1;
+      MINUTE = 2;
+      HOUR = 3;
+      DAY = 4;
+      WEEK = 7;
+      MONTH = 5;
+      YEAR = 6;
+    }
+
+    string name = 3;
+    uint32 requests_per_unit = 1;
+    Unit unit = 2;
+  }
+
+  // One per request descriptor, in the same order. Envoy builds the
+  // x-ratelimit-* headers from these.
+  message DescriptorStatus {
+    Code code = 1;
+    RateLimit current_limit = 2;
+    uint32 limit_remaining = 3;
+    google.protobuf.Duration duration_until_reset = 4;
+    // Omitted: quota = 5.
+  }
+
+  Code overall_code = 1;
+  repeated DescriptorStatus statuses = 2;
+  // Omitted: response_headers_to_add = 3, request_headers_to_add = 4,
+  // raw_body = 5, dynamic_metadata = 6, quota = 7.
+}

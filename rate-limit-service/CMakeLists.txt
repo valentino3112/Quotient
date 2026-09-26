@@ -23,9 +23,9 @@ if(QUOTIENT_SANITIZER)
 endif()
  
 
+add_subdirectory(proto)    # generated code first: src links quotient_proto
 add_subdirectory(src)      # apply -Wall -Wextra -Werror to your own targets only
 
-#add_subdirectory(proto)
 #enable_testing()
 #add_subdirectory(tests)
 #add_subdirectory(bench)

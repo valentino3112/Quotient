@@ -7,6 +7,8 @@ namespace quotient::web {
 
 namespace rls = envoy::service::ratelimit::v3;
 
+//https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ratelimit/v3/rls.proto
+
 grpc::Status RateLimitGrpcService::ShouldRateLimit(grpc::ServerContext* /*context*/,
                                                    const rls::RateLimitRequest* request,
                                                    rls::RateLimitResponse* response) 
@@ -18,7 +20,7 @@ grpc::Status RateLimitGrpcService::ShouldRateLimit(grpc::ServerContext* /*contex
   // Debug level: this runs on every request. Never log descriptor values,
   // they contain API keys.
   spdlog::debug("ShouldRateLimit domain={} descriptors={}", request->domain(), request->descriptors_size());
-
+  
   // Envoy expects one status per descriptor, in request order.
   for (int i = 0; i < request->descriptors_size(); ++i) {
     response->add_statuses()->set_code(rls::RateLimitResponse::OK);

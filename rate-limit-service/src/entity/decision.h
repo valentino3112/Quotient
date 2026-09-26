@@ -11,7 +11,7 @@
 namespace quotient::entity {
 
 enum class DecisionCode { kOk, kOverLimit };
-
+// https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ratelimit/v3/rls.proto#service-ratelimit-v3-ratelimitresponse-ratelimit
 // The limit that applied to a descriptor (reported back to Envoy).
 struct AppliedLimit {
   std::string policy_name;
@@ -19,6 +19,7 @@ struct AppliedLimit {
   RateUnit unit = RateUnit::kSecond;
 };
 
+//https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ratelimit/v3/rls.proto#service-ratelimit-v3-ratelimitresponse-descriptorstatus
 // The outcome for ONE descriptor.
 struct Decision {
   DecisionCode code = DecisionCode::kOk;

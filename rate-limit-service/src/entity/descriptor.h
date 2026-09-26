@@ -6,6 +6,8 @@
 
 namespace quotient::entity {
 
+
+//https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/common/ratelimit/v3/ratelimit.proto#envoy-v3-api-msg-extensions-common-ratelimit-v3-ratelimitdescriptor
 struct DescriptorEntry {
   std::string key;
   std::string value;

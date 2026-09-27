@@ -45,10 +45,11 @@ PgPolicyRepository::PgPolicyRepository(std::string connection_url)
 ConfigData PgPolicyRepository::LoadConfig() {
   try {
     pqxx::connection connection(connection_url_);
-    // REPEATABLE READ: all queries below see the same snapshot of the data,
-    // even if an admin changes a policy halfway through the load.
-    pqxx::transaction<pqxx::isolation_level::repeatable_read, pqxx::write_policy::read_only> tx(
-        connection);
+    
+    pqxx::transaction<
+            pqxx::isolation_level::repeatable_read, // REPEATABLE READ: all queries below see the same snapshot of the data, even if an admin changes a policy halfway through the load.
+            pqxx::write_policy::read_only
+    > tx(connection);
 
     ConfigData data;
     data.version = tx.query_value<std::int64_t>("SELECT version FROM config_state");

@@ -7,8 +7,9 @@ Quotient answers `OK` or `OVER_LIMIT`, and Envoy turns `OVER_LIMIT` into an HTTP
 Requests`. Counters live in Redis, so any number of Quotient nodes enforce the same limits.
 Tenants, API keys and policies live in PostgreSQL.
 
-> **Status:** course project (deadline 27 September 2026). Rate limiting works end to end;
-> the admin API is not built yet. See [Project status](#project-status).
+> **Status:** course project (deadline 27 September 2026). Rate limiting and a first version
+> of the admin API (tenants, over gRPC and REST) work end to end. See
+> [Project status](#project-status).
 
 ## How it works
 
@@ -19,8 +20,9 @@ flowchart LR
     envoy -->|gRPC ShouldRateLimit<br/>:8081, 20 ms timeout| quotient[Quotient]
     quotient -->|Lua scripts<br/>per request| redis[(Redis<br/>counters)]
     quotient -.->|at startup| postgres[(PostgreSQL<br/>tenants, keys, policies)]
-    admin([Operator]) -.->|REST :8000<br/>planned| envoy
-    envoy -.->|gRPC AdminService<br/>:8082, planned| quotient
+    admin([Operator]) -->|REST :8000<br/>Bearer token| envoy
+    envoy -->|gRPC AdminService<br/>:8082| quotient
+    quotient -->|admin reads/writes| postgres
 ```
 
 1. **Hot path (every request).** Envoy's rate limit filter sends *descriptors*, for example
@@ -31,8 +33,11 @@ flowchart LR
    (fixed window or GCRA). Redis's own clock is used, so nodes never compare clocks.
 3. **Control path.** Policies and key hashes are loaded from PostgreSQL into an in-memory
    snapshot at startup. PostgreSQL is never called per request.
-4. **Admin API (planned).** A gRPC `AdminService` will manage tenants, keys and policies.
-   Envoy will expose it as REST/JSON through its gRPC-JSON transcoder.
+4. **Admin API.** A gRPC `AdminService` manages tenants (API keys and policies come
+   later). Envoy exposes the same API as REST/JSON on port 8000 through its gRPC-JSON
+   transcoder, using the `google.api.http` annotations in `admin.proto`. Errors are
+   converted in one central place into gRPC status codes, which Envoy turns into HTTP
+   errors with a message (for example `409` for a duplicate tenant).
 
 If Quotient is unreachable or too slow, Envoy lets the request through (fail open). Each
 policy also chooses what happens when Redis is down: `fail_open` (allow) or `fail_closed`
@@ -49,7 +54,8 @@ policy also chooses what happens when Redis is down: `fail_open` (allow) or `fai
 | Docker Compose stack (PostgreSQL, Redis, Envoy, backend, Quotient) | Done |
 | Rate limiting: policies from PostgreSQL, Redis counters (GCRA, fixed window), 429s | Done |
 | Failure modes when Redis is down (`fail_open`, `fail_closed`) | Done, see [known limitations](#known-limitations) |
-| Admin API (gRPC and REST) with central error handling | Planned |
+| Admin API over gRPC and REST: tenants (create, get, list), bearer token, central error handling | Done |
+| Admin API: API keys, policies, usage | After the deadline |
 | Live policy reload, circuit breaker, metrics, benchmarks | After the deadline |
 
 ## Try it: from clone to 429
@@ -170,7 +176,54 @@ Acme's policy is `fail_open`, so it keeps getting `200`. The anonymous policy is
 `fail_closed`, so it gets `429`. After `start redis`, Quotient reloads its Lua scripts by
 itself and everything is back to normal, with no restart.
 
-### 8. Stop
+### 8. Use the admin API (REST)
+
+Every admin call needs the admin token (`dev-admin-token` in the dev setup).
+
+```bash
+TOKEN=dev-admin-token
+
+# List and read tenants
+curl -s -H "authorization: Bearer $TOKEN" localhost:8000/v1/tenants
+curl -s -H "authorization: Bearer $TOKEN" localhost:8000/v1/tenants/acme
+
+# Create a tenant (written to PostgreSQL)
+curl -s -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"slug": "hooli", "display_name": "Hooli"}' localhost:8000/v1/tenants
+```
+
+Errors come back as an HTTP status with a JSON message. Add `-w '%{http_code}\n'` to any
+command to see the status:
+
+```bash
+# Duplicate tenant -> 409
+curl -s -w '%{http_code}\n' -X POST -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"slug": "acme", "display_name": "Acme again"}' localhost:8000/v1/tenants
+```
+
+```
+{
+ "code": 6,
+ "message": "tenant 'acme' already exists",
+ "details": []
+}
+409
+```
+
+| Request | HTTP status | Message |
+|---|---|---|
+| Tenant slug already taken | 409 | `tenant 'acme' already exists` |
+| `GET /v1/tenants/nope` | 404 | `tenant 'nope' not found` |
+| Invalid slug, e.g. `Bad Slug!` | 400 | `slug must be 2-40 characters: lowercase letters, digits or '-'` |
+| No token, or a wrong token | 401 | `missing authorization header` / `invalid admin token` |
+| PostgreSQL down | 503 | `a dependency is unavailable, try again later` |
+
+The same API is available as plain gRPC on port 8082 of the Quotient container, for example
+with grpcurl from inside the Compose network or when running Quotient locally (see
+[Building locally](#building-locally-development)).
+
+### 9. Stop
 
 ```bash
 make down
@@ -190,6 +243,8 @@ To override the dev defaults (database credentials, log level), copy `deploy/.en
   gives up after 20 ms and lets the request through. A circuit breaker (skip Redis for a
   moment after a failure) fixes this and is planned.
 - **`local_fallback`** currently behaves like `fail_open`.
+- **The admin API** only manages tenants so far. API keys and policies are changed directly
+  in PostgreSQL for now.
 - **Policy changes** in PostgreSQL are picked up only when Quotient restarts
   (`docker compose -f deploy/docker-compose.yml restart quotient`).
 
@@ -199,9 +254,9 @@ One folder per service or sub-project:
 
 ```
 rate-limit-service/   The Quotient service (C++20, CMake, vcpkg)
-  proto/              Envoy RLS v3 subset (+ admin API later)
+  proto/              Envoy RLS v3 subset, admin API (admin.proto), vendored google/api
   scripts/lua/        Redis Lua scripts (GCRA, fixed window), embedded in the binary
-  src/web/            gRPC controllers: translate messages, no business logic
+  src/web/            gRPC controllers (RLS, admin) and the central error mapping
   src/service/        Business logic (decision engine, policies), domain errors
   src/entity/         Plain data types
   src/repository/     PostgreSQL and Redis access, behind interfaces
@@ -209,7 +264,7 @@ rate-limit-service/   The Quotient service (C++20, CMake, vcpkg)
   Dockerfile          Two-stage image build (builder + slim runtime)
 database/             SQL schema (0001_init.sql) and demo data (0002_seed.sql)
 deploy/               docker-compose.yml, .env.example
-gateway/              Envoy configuration (envoy.yaml)
+gateway/              Envoy configuration: edge listener (:8080), REST admin listener (:8000)
 docs/                 Architecture documentation
 Makefile              Shortcuts for the Compose stack
 ```
@@ -231,6 +286,7 @@ Run it against the PostgreSQL and Redis from the Compose stack (`make up` first)
 ```bash
 QUOTIENT_PG_URL=postgresql://quotient:quotient@localhost:5432/quotient \
 QUOTIENT_REDIS_URL=tcp://localhost:6379 \
+QUOTIENT_ADMIN_TOKEN=dev-admin-token \
 SPDLOG_LEVEL=debug ./build/debug/src/quotient
 ```
 
@@ -241,6 +297,10 @@ enabled, so no `.proto` files are needed):
 grpcurl -plaintext localhost:8081 list
 grpcurl -plaintext -d '{"domain":"api","descriptors":[{"entries":[{"key":"api_key","value":"qk_demo_acme"}]}]}' \
   localhost:8081 envoy.service.ratelimit.v3.RateLimitService/ShouldRateLimit
+
+# Admin API over gRPC (port 8082)
+grpcurl -plaintext -H 'authorization: Bearer dev-admin-token' -d '{}' \
+  localhost:8082 quotient.admin.v1.AdminService/ListTenants
 ```
 
 ### Configuration
@@ -248,7 +308,9 @@ grpcurl -plaintext -d '{"domain":"api","descriptors":[{"entries":[{"key":"api_ke
 | Variable | Default | Meaning |
 |---|---|---|
 | `QUOTIENT_PG_URL` | *required* | PostgreSQL connection URL |
+| `QUOTIENT_ADMIN_TOKEN` | *required* | Bearer token for the admin API |
 | `QUOTIENT_RLS_ADDR` | `0.0.0.0:8081` | Rate Limit Service gRPC listener |
+| `QUOTIENT_ADMIN_ADDR` | `0.0.0.0:8082` | Admin API gRPC listener |
 | `QUOTIENT_REDIS_URL` | `tcp://redis:6379` | Redis address |
 | `QUOTIENT_REDIS_TIMEOUT_MS` | `5` | Redis command timeout (must stay well below Envoy's 20 ms) |
 | `QUOTIENT_RLS_MAX_THREADS` | `32` | Maximum gRPC worker threads |
@@ -261,8 +323,10 @@ grpcurl -plaintext -d '{"domain":"api","descriptors":[{"entries":[{"key":"api_ke
 - **Inversion of control.** Dependencies are interfaces passed through constructors. Only
   `main.cpp` creates concrete classes and wires them together.
 - **Logging.** spdlog only. API keys and tokens are never logged.
-- **Errors.** Services throw domain exceptions. One central function turns them into gRPC
-  status codes, which Envoy turns into HTTP errors with a message.
+- **Errors.** Services throw domain exceptions (`service/errors.h`). One central function
+  (`web/error_mapping.cpp`) turns them into gRPC status codes, which Envoy turns into HTTP
+  errors with a message. The rate limit handler never throws: on an unexpected error it
+  allows the request.
 - **Stateless.** Nodes keep no per-client state. Counters are in Redis and configuration is
   in PostgreSQL, so nodes can be scaled freely.
 

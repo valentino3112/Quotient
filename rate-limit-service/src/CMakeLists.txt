@@ -12,12 +12,16 @@ configure_file(repository/lua_scripts.h.in
 add_executable(quotient
   main.cpp
   repository/pg_policy_repository.cpp
+  repository/pg_tenant_repository.cpp
   repository/redis_rate_limit_backend.cpp
   service/decision_engine.cpp
   service/policy_service.cpp
   service/policy_set.cpp
+  service/tenant_service.cpp
   util/config.cpp
   util/sha256.cpp
+  web/admin_grpc_service.cpp
+  web/error_mapping.cpp
   web/rate_limit_grpc_service.cpp
 )
 target_include_directories(quotient PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}

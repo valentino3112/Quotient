@@ -17,19 +17,23 @@
 #include <thread>
 
 #include "repository/pg_policy_repository.h"
+#include "repository/pg_tenant_repository.h"
 #include "repository/redis_rate_limit_backend.h"
 #include "service/decision_engine.h"
 #include "service/errors.h"
 #include "service/policy_service.h"
 #include "service/policy_store.h"
+#include "service/tenant_service.h"
 #include "util/clock.h"
 #include "util/config.h"
+#include "web/admin_grpc_service.h"
 #include "web/rate_limit_grpc_service.h"
 
 namespace {
 
 constexpr auto kShutdownGrace = std::chrono::seconds(5);
 constexpr int kStartupLoadAttempts = 10;
+constexpr int kAdminMaxThreads = 4;  // admin traffic is rare
 
 // Runs a startup step that needs PostgreSQL or Redis. They may still be
 // starting (docker compose up), so retry with exponential backoff:
@@ -107,6 +111,10 @@ int main() {
   quotient::service::DecisionEngine decision_engine(policy_store, rate_limit_backend, clock);
   quotient::web::RateLimitGrpcService rls_service(decision_engine);
 
+  quotient::repository::PgTenantRepository tenant_repository(config.pg_url);
+  quotient::service::TenantService tenant_service(tenant_repository);
+  quotient::web::AdminGrpcService admin_service(tenant_service, config.admin_token);
+
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
 
@@ -128,12 +136,29 @@ int main() {
   rls_server->GetHealthCheckService()->SetServingStatus(true);
   spdlog::info("RLS gRPC server listening on {} (max {} threads)", config.rls_address, config.rls_max_threads);
 
+  // A separate server and port for the admin API, with its own small thread
+  // pool, so admin calls can never slow down rate limit decisions.
+  grpc::ResourceQuota admin_quota("admin");
+  admin_quota.SetMaxThreads(kAdminMaxThreads);
+  grpc::ServerBuilder admin_builder;
+  admin_builder.AddListeningPort(config.admin_address, grpc::InsecureServerCredentials());
+  admin_builder.RegisterService(&admin_service);
+  admin_builder.SetResourceQuota(admin_quota);
+  std::unique_ptr<grpc::Server> admin_server = admin_builder.BuildAndStart();
+  if (!admin_server) {
+    spdlog::critical("failed to start admin server on {}", config.admin_address);
+    return 1;
+  }
+  spdlog::info("admin gRPC server listening on {}", config.admin_address);
+
   int signal = WaitForShutdownSignal(shutdown_signals);
   spdlog::info("received signal {}, shutting down", signal);
 
   //Graceful shutdown
   rls_server->GetHealthCheckService()->SetServingStatus(false);
-  rls_server->Shutdown(std::chrono::system_clock::now() + kShutdownGrace);
+  auto shutdown_deadline = std::chrono::system_clock::now() + kShutdownGrace;
+  admin_server->Shutdown(shutdown_deadline);
+  rls_server->Shutdown(shutdown_deadline);
   spdlog::info("shutdown complete");
   return 0;
 }

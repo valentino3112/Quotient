@@ -65,3 +65,10 @@ COPY --from=builder /build/rate-limit-service/build/release/src/quotient /usr/lo
 USER quotient
 # Quotient handles SIGTERM itself (main.cpp), so no init wrapper is needed.
 ENTRYPOINT ["/usr/local/bin/quotient"]
+
+# ---------------------------------------------------------------------------
+# Envoy with the admin API descriptor set baked in. The transcoder needs
+# quotient_admin.pb, which the builder generates from admin.proto (it is never
+# committed). envoy.yaml itself is still mounted from gateway/ by Compose.
+FROM envoyproxy/envoy:v1.37.6 AS envoy
+COPY --from=builder /build/rate-limit-service/build/release/quotient_admin.pb /etc/envoy/quotient_admin.pb

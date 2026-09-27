@@ -44,6 +44,8 @@ int GetPositiveInt(const char* name, int fallback) {
 Config LoadConfigFromEnv() {
   Config config;
   config.rls_address = GetString("QUOTIENT_RLS_ADDR", "0.0.0.0:8081");
+  config.admin_address = GetString("QUOTIENT_ADMIN_ADDR", "0.0.0.0:8082");
+  config.admin_token = GetRequiredString("QUOTIENT_ADMIN_TOKEN");
   config.pg_url = GetRequiredString("QUOTIENT_PG_URL");
   config.redis_url = GetString("QUOTIENT_REDIS_URL", "tcp://redis:6379");
   config.redis_timeout = std::chrono::milliseconds(GetPositiveInt("QUOTIENT_REDIS_TIMEOUT_MS", 5));

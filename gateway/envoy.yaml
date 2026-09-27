@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Adapted from docs/quotient-guide.md §18. Only the "edge" listener (public,
-# rate-limited traffic) is here so far. The "admin_rest" listener (gRPC-JSON
-# transcoding on :8000) is added once rate-limit-service/proto/admin.proto
-# exists and we have a quotient_admin.pb descriptor set to mount — see
-# CLAUDE.md §11 and HANDOFF-person-b.md §4/§5 task 6.
+# Adapted from docs/quotient-guide.md §18. Two listeners:
+# - "edge" (:8080): public traffic, rate limited by Quotient (RLS gRPC :8081).
+# - "admin_rest" (:8000): the admin API as REST/JSON. The gRPC-JSON transcoder
+#   turns each HTTP request into a call to Quotient's AdminService (:8082),
+#   using the descriptor set built from admin.proto (baked into the Envoy image
+#   by the "envoy" stage of rate-limit-service/Dockerfile).
 
 admin:
   address:
@@ -69,6 +70,39 @@ static_resources:
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
+  # ---------------- admin API as REST/JSON ----------------
+  - name: admin_rest
+    address:
+      socket_address: { address: 0.0.0.0, port_value: 8000 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: admin_rest
+          route_config:
+            name: admin_routes
+            virtual_hosts:
+            - name: admin
+              domains: ["*"]
+              routes:
+              - match: { prefix: "/" }
+                route: { cluster: quotient_admin, timeout: 5s }
+          http_filters:
+          - name: envoy.filters.http.grpc_json_transcoder
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+              proto_descriptor: /etc/envoy/quotient_admin.pb
+              services: ["quotient.admin.v1.AdminService"]
+              convert_grpc_status: true         # gRPC error -> HTTP status + JSON message
+              print_options:
+                add_whitespace: true
+                always_print_primitive_fields: true
+                preserve_proto_field_names: true
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
   clusters:
   - name: backend
     type: STRICT_DNS
@@ -97,3 +131,16 @@ static_resources:
       endpoints:
       - lb_endpoints:
         - endpoint: { address: { socket_address: { address: quotient, port_value: 8081 } } }
+
+  - name: quotient_admin
+    type: STRICT_DNS
+    connect_timeout: 0.25s
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config: { http2_protocol_options: {} }   # gRPC needs HTTP/2
+    load_assignment:
+      cluster_name: quotient_admin
+      endpoints:
+      - lb_endpoints:
+        - endpoint: { address: { socket_address: { address: quotient, port_value: 8082 } } }

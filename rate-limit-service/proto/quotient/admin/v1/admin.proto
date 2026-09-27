@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Quotient's admin API. One definition, two protocols:
+// - gRPC directly on :8082 (e.g. grpcurl, using server reflection);
+// - REST/JSON on :8000 through Envoy's gRPC-JSON transcoder, which follows the
+//   google.api.http annotations below.
+// Every call needs the header `authorization: Bearer <admin token>`.
+//
+// Errors are gRPC status codes, turned into HTTP by the transcoder:
+//   INVALID_ARGUMENT 400, UNAUTHENTICATED 401, NOT_FOUND 404,
+//   ALREADY_EXISTS 409, UNAVAILABLE 503, INTERNAL 500.
+
+syntax = "proto3";
+
+package quotient.admin.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+service AdminService {
+  rpc CreateTenant(CreateTenantRequest) returns (Tenant) {
+    option (google.api.http) = {
+      post: "/v1/tenants"
+      body: "*"
+    };
+  }
+  rpc GetTenant(GetTenantRequest) returns (Tenant) {
+    option (google.api.http) = {
+      get: "/v1/tenants/{slug}"
+    };
+  }
+  rpc ListTenants(ListTenantsRequest) returns (ListTenantsResponse) {
+    option (google.api.http) = {
+      get: "/v1/tenants"
+    };
+  }
+}
+
+message Tenant {
+  string id = 1;
+  string slug = 2;  // "acme": used in policies, Redis keys and URLs
+  string display_name = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message CreateTenantRequest {
+  string slug = 1;  // 2-40 characters: lowercase letters, digits, '-'
+  string display_name = 2;
+}
+
+message GetTenantRequest {
+  string slug = 1;
+}
+
+message ListTenantsRequest {}
+
+message ListTenantsResponse {
+  repeated Tenant tenants = 1;
+}

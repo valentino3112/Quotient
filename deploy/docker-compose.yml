@@ -59,8 +59,13 @@ services:
     # another container) rather than from the host.
 
   envoy:
-    image: envoyproxy/envoy:v1.37.6
+    # envoyproxy/envoy:v1.37.6 plus the admin API descriptor set, built by the
+    # "envoy" stage of the Quotient Dockerfile (needed by the REST transcoder).
+    build:
+      context: ..
+      dockerfile: rate-limit-service/Dockerfile
+      target: envoy
     volumes:
       - ../gateway/envoy.yaml:/etc/envoy/envoy.yaml:ro
-    ports: ["8080:8080", "9901:9901"]  # 8000 (REST admin) added once admin.proto exists
+    ports: ["8080:8080", "8000:8000", "9901:9901"]  # edge, REST admin, Envoy admin/stats
     depends_on: [backend, quotient]

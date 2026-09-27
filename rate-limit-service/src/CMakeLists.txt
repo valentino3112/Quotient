@@ -1,5 +1,7 @@
 add_executable(quotient
   main.cpp
+  repository/pg_policy_repository.cpp
+  service/policy_service.cpp
   service/policy_set.cpp
   util/config.cpp
   util/sha256.cpp
@@ -7,5 +9,5 @@ add_executable(quotient
 )
 target_include_directories(quotient PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(quotient PRIVATE quotient_proto gRPC::grpc++_reflection
-                                       OpenSSL::Crypto spdlog::spdlog)
+                                       OpenSSL::Crypto libpqxx::pqxx spdlog::spdlog)
 target_compile_options(quotient PRIVATE -Wall -Wextra -Wpedantic)

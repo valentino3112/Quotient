@@ -18,9 +18,11 @@
 
 #include "repository/pg_policy_repository.h"
 #include "repository/redis_rate_limit_backend.h"
+#include "service/decision_engine.h"
 #include "service/errors.h"
 #include "service/policy_service.h"
 #include "service/policy_store.h"
+#include "util/clock.h"
 #include "util/config.h"
 #include "web/rate_limit_grpc_service.h"
 
@@ -101,7 +103,9 @@ int main() {
   sigaddset(&shutdown_signals, SIGTERM);
   pthread_sigmask(SIG_BLOCK, &shutdown_signals, nullptr);
 
-  quotient::web::RateLimitGrpcService rls_service;
+  quotient::util::SystemClock clock;
+  quotient::service::DecisionEngine decision_engine(policy_store, rate_limit_backend, clock);
+  quotient::web::RateLimitGrpcService rls_service(decision_engine);
 
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
@@ -120,7 +124,7 @@ int main() {
     spdlog::critical("failed to start RLS server on {}", config.rls_address);
     return 1;
   }
-  // Stub has nothing to load, so it is ready immediately.
+  // Policies and scripts are loaded (see above), so we are ready.
   rls_server->GetHealthCheckService()->SetServingStatus(true);
   spdlog::info("RLS gRPC server listening on {} (max {} threads)", config.rls_address, config.rls_max_threads);
 

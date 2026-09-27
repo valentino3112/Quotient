@@ -13,6 +13,7 @@ add_executable(quotient
   main.cpp
   repository/pg_policy_repository.cpp
   repository/redis_rate_limit_backend.cpp
+  service/decision_engine.cpp
   service/policy_service.cpp
   service/policy_set.cpp
   util/config.cpp

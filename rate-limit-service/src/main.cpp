@@ -13,9 +13,11 @@
 #include <csignal>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "repository/pg_policy_repository.h"
+#include "repository/redis_rate_limit_backend.h"
 #include "service/errors.h"
 #include "service/policy_service.h"
 #include "service/policy_store.h"
@@ -27,18 +29,18 @@ namespace {
 constexpr auto kShutdownGrace = std::chrono::seconds(5);
 constexpr int kStartupLoadAttempts = 10;
 
-// The first snapshot is required: without policies we cannot decide anything.
-// PostgreSQL may still be starting (docker compose up), so retry with
-// exponential backoff: 0.5 s, 1 s, 2 s, 4 s, then every 5 s.
-bool LoadInitialConfig(quotient::service::PolicyService& policy_service) {
+// Runs a startup step that needs PostgreSQL or Redis. They may still be
+// starting (docker compose up), so retry with exponential backoff:
+// 0.5 s, 1 s, 2 s, 4 s, then every 5 s. Returns false after the last attempt.
+template <typename Step>
+bool RetryAtStartup(std::string_view what, Step&& step) {
   auto delay = std::chrono::milliseconds(500);
   for (int attempt = 1; attempt <= kStartupLoadAttempts; ++attempt) {
     try {
-      policy_service.Reload();
+      step();
       return true;
     } catch (const quotient::service::Unavailable& e) {
-      spdlog::warn("configuration load attempt {}/{} failed: {}", attempt, kStartupLoadAttempts,
-                   e.what());
+      spdlog::warn("{}: attempt {}/{} failed: {}", what, attempt, kStartupLoadAttempts, e.what());
     }
     std::this_thread::sleep_for(delay);
     delay = std::min(delay * 2, std::chrono::milliseconds(5000));
@@ -71,15 +73,21 @@ int main() {
   quotient::repository::PgPolicyRepository policy_repository(config.pg_url);
   quotient::service::PolicyStore policy_store;
   quotient::service::PolicyService policy_service(policy_repository, policy_store);
+  quotient::repository::RedisRateLimitBackend rate_limit_backend(
+      config.redis_url, config.redis_timeout, static_cast<std::size_t>(config.rls_max_threads));
 
-  // Before the gRPC server starts: it only accepts calls once policies are loaded.
+  // Before the gRPC server starts: it only accepts calls once the policies and
+  // the Redis scripts are loaded.
   try {
-    if (!LoadInitialConfig(policy_service)) {
-      spdlog::critical("could not load the configuration from PostgreSQL, giving up");
+    if (!RetryAtStartup("loading configuration from PostgreSQL",
+                        [&] { policy_service.Reload(); }) ||
+        !RetryAtStartup("loading Lua scripts into Redis",
+                        [&] { rate_limit_backend.LoadScripts(); })) {
+      spdlog::critical("startup failed: a dependency stayed unreachable, giving up");
       return 1;
     }
   } catch (const std::exception& e) {  // e.g. an SQL error: a bug, retrying will not help
-    spdlog::critical("failed to load the configuration: {}", e.what());
+    spdlog::critical("startup failed: {}", e.what());
     return 1;
   }
 

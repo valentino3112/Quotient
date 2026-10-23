@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# CI for Quotient: build the images, start the full Compose stack, and run the
+# same end-to-end checks as the README ("from clone to 429") on every push.
+#
+# The first run is slow (vcpkg compiles gRPC and friends, ~40 min). The vcpkg
+# layer is then cached in the GitHub Actions cache, so later runs only rebuild
+# the Quotient sources.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build images and run end-to-end tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Validate the Compose file
+        run: docker compose -f deploy/docker-compose.yml config --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the Quotient image (runtime target)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: rate-limit-service/Dockerfile
+          target: runtime
+          tags: quotient-ci:runtime
+          load: true
+          cache-from: type=gha,scope=quotient
+          cache-to: type=gha,scope=quotient,mode=max
+
+      - name: Build the Envoy image (envoy target)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: rate-limit-service/Dockerfile
+          target: envoy
+          tags: quotient-ci:envoy
+          load: true
+          cache-from: type=gha,scope=quotient
+
+      - name: Start the stack with the images built above
+        run: |
+          cat > deploy/docker-compose.ci.yml <<'EOF'
+          services:
+            quotient:
+              image: quotient-ci:runtime
+            envoy:
+              image: quotient-ci:envoy
+          EOF
+          docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ci.yml up -d --no-build
+
+      - name: Wait until Envoy answers through Quotient
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -H 'x-api-key: qk_demo_acme' localhost:8080/v1/items || true)
+            if [ "$code" = "200" ]; then echo "Stack is up after ${i} tries"; exit 0; fi
+            sleep 2
+          done
+          echo "Stack did not become ready (last HTTP code: $code)"; exit 1
+
+      - name: "Test: a valid API key is allowed and gets rate limit headers"
+        run: |
+          headers=$(curl -s -D - -o /dev/null -H 'x-api-key: qk_demo_globex' localhost:8080/v1/items)
+          echo "$headers"
+          echo "$headers" | grep -q '^HTTP/1.1 200'
+          echo "$headers" | grep -qi '^x-ratelimit-limit:'
+
+      - name: "Test: anonymous traffic is limited (fixed window, 10 per minute)"
+        run: |
+          codes=$(for i in $(seq 15); do curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/v1/items; done)
+          echo "$codes" | sort | uniq -c
+          echo "$codes" | grep -q '^200$'
+          echo "$codes" | grep -q '^429$'
+
+      - name: "Test: admin API requires a token and lists tenants"
+        run: |
+          no_token=$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/v1/tenants)
+          with_token=$(curl -s -o /dev/null -w '%{http_code}' -H 'authorization: Bearer dev-admin-token' localhost:8000/v1/tenants)
+          echo "without token: $no_token, with token: $with_token"
+          [ "$no_token" = "401" ]
+          [ "$with_token" = "200" ]
+
+      - name: Show logs if something failed
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ci.yml logs --no-color
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ci.yml down -v
